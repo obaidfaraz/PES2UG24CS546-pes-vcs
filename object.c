@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <openssl/evp.h>
 
-// PROVIDED
+// ─── PROVIDED ────────────────────────────────────────────────────────────────
 
 void hash_to_hex(const ObjectID *id, char *hex_out) {
     for (int i = 0; i < HASH_SIZE; i++) {
@@ -49,7 +49,7 @@ int object_exists(const ObjectID *id) {
     return access(path, F_OK) == 0;
 }
 
-// IMPLEMENTATION
+// ─── IMPLEMENTATION ──────────────────────────────────────────────────────────
 
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
     const char *type_str;
@@ -58,11 +58,9 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     else if (type == OBJ_COMMIT) type_str = "commit";
     else return -1;
 
-    // FIXED HEADER
+    // Build header: "<type> <size>\0"
     char header[64];
-    int n = snprintf(header, sizeof(header), "%s %zu", type_str, len);
-    header[n] = '\0';   // explicitly add null
-    int header_len = n + 1;
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
     size_t total_size = header_len + len;
     char *buffer = malloc(total_size);
@@ -71,24 +69,29 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     memcpy(buffer, header, header_len);
     memcpy(buffer + header_len, data, len);
 
+    // Compute hash
     compute_hash(buffer, total_size, id_out);
 
+    // Deduplication
     if (object_exists(id_out)) {
         free(buffer);
         return 0;
     }
 
+    // Get object path
     char path[512];
     object_path(id_out, path, sizeof(path));
 
+    // Create shard directory
     char dir[512];
     strncpy(dir, path, sizeof(dir));
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
-        mkdir(dir, 0755);
+        mkdir(dir, 0755); // OK if exists
     }
 
+    // Write object
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) {
         free(buffer);
@@ -125,9 +128,14 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
         return -1;
     }
 
-    fread(buffer, 1, file_size, f);
+    if (fread(buffer, 1, file_size, f) != (size_t)file_size) {
+        fclose(f);
+        free(buffer);
+        return -1;
+    }
     fclose(f);
 
+    // Verify hash
     ObjectID computed;
     compute_hash(buffer, file_size, &computed);
     if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
@@ -135,6 +143,7 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
         return -1;
     }
 
+    // Parse header
     char *null_pos = memchr(buffer, '\0', file_size);
     if (!null_pos) {
         free(buffer);
@@ -145,7 +154,10 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
 
     char type_str[10];
     size_t size;
-    sscanf(buffer, "%s %zu", type_str, &size);
+    if (sscanf(buffer, "%s %zu", type_str, &size) != 2) {
+        free(buffer);
+        return -1;
+    }
 
     if (strcmp(type_str, "blob") == 0) *type_out = OBJ_BLOB;
     else if (strcmp(type_str, "tree") == 0) *type_out = OBJ_TREE;
@@ -156,6 +168,11 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
     }
 
     void *data = malloc(size);
+    if (!data) {
+        free(buffer);
+        return -1;
+    }
+
     memcpy(data, null_pos + 1, size);
 
     *data_out = data;
