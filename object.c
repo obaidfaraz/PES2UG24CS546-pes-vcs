@@ -50,24 +50,32 @@ int object_exists(const ObjectID *id) {
 }
 
 // ─── IMPLEMENTATION ──────────────────────────────────────────────────────────
-
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
+    if (!id_out) return -1;
+
     const char *type_str;
     if (type == OBJ_BLOB) type_str = "blob";
     else if (type == OBJ_TREE) type_str = "tree";
     else if (type == OBJ_COMMIT) type_str = "commit";
     else return -1;
 
-    // Build header: "<type> <size>\0"
+    // Build header
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
     size_t total_size = header_len + len;
+
+    // 🔥 SAFE allocation
     char *buffer = malloc(total_size);
     if (!buffer) return -1;
 
     memcpy(buffer, header, header_len);
-    memcpy(buffer + header_len, data, len);
+
+    if (len > 0 && data)
+        memcpy(buffer + header_len, data, len);
+
+    // 🔥 CRITICAL: zero id before hashing
+    memset(id_out, 0, sizeof(ObjectID));
 
     // Compute hash
     compute_hash(buffer, total_size, id_out);
@@ -78,27 +86,29 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         return 0;
     }
 
-    // Get object path
+    // Build path
     char path[512];
     object_path(id_out, path, sizeof(path));
 
-    // Create shard directory
+    // 🔥 SAFE directory creation
     char dir[512];
-    strncpy(dir, path, sizeof(dir));
+    snprintf(dir, sizeof(dir), "%s", path);
+
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
-        mkdir(dir, 0755); // OK if exists
+        mkdir(dir, 0755);
     }
 
-    // Write object
+    // Write file
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) {
         free(buffer);
         return -1;
     }
 
-    if (write(fd, buffer, total_size) != (ssize_t)total_size) {
+    ssize_t written = write(fd, buffer, total_size);
+    if (written != (ssize_t)total_size) {
         close(fd);
         free(buffer);
         return -1;
@@ -110,7 +120,6 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     return 0;
 }
-
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     char path[512];
     object_path(id, path, sizeof(path));
