@@ -63,19 +63,50 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
-    // Allocate buffer for full object
+    // Build full object buffer
     size_t total_size = header_len + len;
     char *buffer = malloc(total_size);
     if (!buffer) return -1;
 
-    // Copy header and data
     memcpy(buffer, header, header_len);
     memcpy(buffer + header_len, data, len);
 
-    // Compute SHA-256 hash
+    // Compute hash
     compute_hash(buffer, total_size, id_out);
 
-    // Free buffer (file writing will be added next step)
+    // Deduplication: if already exists, skip writing
+    if (object_exists(id_out)) {
+        free(buffer);
+        return 0;
+    }
+
+    // Get final object path
+    char path[512];
+    object_path(id_out, path, sizeof(path));
+
+    // Create shard directory (.pes/objects/XX)
+    char dir[512];
+    strncpy(dir, path, sizeof(dir));
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        mkdir(dir, 0755); // ignore error if exists
+    }
+
+    // Write file
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(buffer);
+        return -1;
+    }
+
+    if (write(fd, buffer, total_size) != (ssize_t)total_size) {
+        close(fd);
+        free(buffer);
+        return -1;
+    }
+
+    close(fd);
     free(buffer);
 
     return 0;
